@@ -1,0 +1,44 @@
+{
+	"name": "m-test-backend",
+	"version": "1.0.0",
+	"description": "Node.js, MongoDB, AdminJS va Swagger bilan professional backend muhiti",
+	"main": "src/server.js",
+	"scripts": {
+		"dev": "nodemon src/server.js",
+		"start": "node src/server.js",
+		"check": "node --check src/server.js && node --check src/app.js && node --check src/config/db.js && node --check src/config/adminjs.js && node --check src/config/swagger.js && node --check src/models/User.js && node --check src/models/Subject.js && node --check src/models/Topic.js && node --check src/models/Question.js && node --check src/models/TestSession.js && node --check src/models/TestAttempt.js && node --check src/routes/index.js",
+		"test": "node --test"
+	},
+	"keywords": [
+		"nodejs",
+		"express",
+		"mongodb",
+		"mongoose",
+		"adminjs",
+		"swagger",
+		"backend"
+	],
+	"license": "ISC",
+	"engines": {
+		"node": ">=18"
+	},
+	"dependencies": {
+		"@adminjs/express": "^6.1.1",
+		"@adminjs/mongoose": "^4.1.0",
+		"adminjs": "^7.8.17",
+		"connect-mongo": "^6.0.0",
+		"cors": "^2.8.6",
+		"dotenv": "^17.4.1",
+		"express": "^5.2.1",
+		"express-formidable": "^1.2.0",
+		"express-session": "^1.19.0",
+		"helmet": "^8.1.0",
+		"mongoose": "^9.4.1",
+		"morgan": "^1.10.1",
+		"swagger-jsdoc": "^6.2.8",
+		"swagger-ui-express": "^5.0.1"
+	},
+	"devDependencies": {
+		"nodemon": "^3.1.14"
+	}
+}

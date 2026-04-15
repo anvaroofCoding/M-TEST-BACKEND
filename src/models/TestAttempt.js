@@ -115,6 +115,12 @@ const testAttemptSchema = new Schema(
 			trim: true,
 			default: '',
 		},
+		qurilmaKaliti: {
+			type: String,
+			trim: true,
+			default: '',
+			index: true,
+		},
 		vaqtLimitMinut: {
 			type: Number,
 			default: 0,
@@ -171,6 +177,7 @@ const testAttemptSchema = new Schema(
 testAttemptSchema.index({ topic: 1, holat: 1, createdAt: -1 })
 testAttemptSchema.index({ holat: 1, yakunlanganVaqt: -1, createdAt: -1 })
 testAttemptSchema.index({ kirishKodi: 1, holat: 1 })
+testAttemptSchema.index({ testSession: 1, qurilmaKaliti: 1, holat: 1 })
 testAttemptSchema.index({ 'ishtirokchiMalumoti.telefonRaqami': 1, holat: 1 })
 
 module.exports = models.TestAttempt || model('TestAttempt', testAttemptSchema)

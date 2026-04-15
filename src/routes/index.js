@@ -285,6 +285,7 @@ function xodimFormatla(user) {
 		familiya: user.lastName || '',
 		fio: user.fullName || fullNameFromParts(user.firstName, user.lastName),
 		telefonRaqami: user.phoneNumber || '',
+		email: user.email || '',
 		tuzilmaNomi: user.organizationName || '',
 		rol: user.role,
 		rolNomi: roleToUz(user.role),
@@ -325,6 +326,163 @@ function buildParticipantInfo(body = {}, { strict = true } = {}) {
 	}
 
 	return malumot
+}
+
+function extractAccessCode(body = {}) {
+	return String(
+		body.kod ?? body.accessCode ?? body.code ?? body.oltiXonaliKod ?? '',
+	)
+		.trim()
+		.replace(/\s+/g, '')
+}
+
+function getAttemptDeviceKey(body = {}) {
+	return String(
+		body.qurilmaId ??
+			body.deviceId ??
+			body.participantKey ??
+			body.sessionKey ??
+			'',
+	)
+		.trim()
+		.slice(0, 160)
+}
+
+function getParticipantName(
+	body = {},
+	participantInfo = buildParticipantInfo(body, { strict: false }),
+) {
+	return (
+		getText(body, 'ishtirokchi', 'participant') ||
+		fullNameFromParts(participantInfo.ism, participantInfo.familiya) ||
+		'Mehmon'
+	)
+}
+
+function buildAttemptIdentityConditions(
+	participantInfo = {},
+	participantName = '',
+	deviceKey = '',
+) {
+	const shartlar = []
+
+	if (deviceKey) {
+		shartlar.push({ qurilmaKaliti: deviceKey })
+	}
+
+	if (participantInfo.telefonRaqami) {
+		shartlar.push({
+			'ishtirokchiMalumoti.telefonRaqami': participantInfo.telefonRaqami,
+		})
+	}
+
+	if (participantName && participantName !== 'Mehmon') {
+		if (participantInfo.tuzilmaNomi) {
+			shartlar.push({
+				ishtirokchi: participantName,
+				'ishtirokchiMalumoti.tuzilmaNomi': participantInfo.tuzilmaNomi,
+			})
+		} else {
+			shartlar.push({ ishtirokchi: participantName })
+		}
+	}
+
+	return shartlar
+}
+
+async function createOrContinueSessionAttempt({
+	req,
+	session,
+	ishtirokchiMalumoti = {},
+	ishtirokchi = 'Mehmon',
+}) {
+	const qurilmaKaliti = getAttemptDeviceKey(req.body)
+	const identityConditions = buildAttemptIdentityConditions(
+		ishtirokchiMalumoti,
+		ishtirokchi,
+		qurilmaKaliti,
+	)
+
+	if (identityConditions.length) {
+		const mavjudUrinish = await TestAttempt.findOne({
+			testSession: session._id,
+			$or: identityConditions,
+		})
+			.populate('subject', 'name')
+			.populate('topic', 'title')
+			.populate('testSession')
+			.sort({ createdAt: -1 })
+
+		if (mavjudUrinish) {
+			const urinishHolati = await ensureAttemptIsCurrent(mavjudUrinish)
+
+			return {
+				status: urinishHolati.open ? 200 : 409,
+				xabar: urinishHolati.open
+					? 'Siz uchun avval boshlangan test davom ettirildi'
+					: 'Bu kod bilan test faqat bir marta ishlanadi. Oldingi urinishingiz yakunlangan',
+				urinish: urinishFormatla(mavjudUrinish.toObject(), {
+					savollarniQosh: true,
+				}),
+			}
+		}
+	}
+
+	const questions = await Question.find({
+		topic: getRelationId(session.topic),
+		isActive: true,
+	})
+		.sort({ order: 1, createdAt: 1 })
+		.limit(session.questionCount || 20)
+		.lean()
+
+	if (!questions.length) {
+		throw createHttpError(404, 'Testni boshlash uchun savollar topilmadi')
+	}
+
+	const preparedQuestions = session.shuffleQuestions
+		? shuffleArray(questions)
+		: questions
+	const natija = natijaHisobla(preparedQuestions, new Map())
+	const vaqtLimitMinut = Math.max(1, toNumber(session.durationMinutes, 30))
+
+	const urinish = await TestAttempt.create({
+		testSession: session._id,
+		subject: getRelationId(session.subject),
+		topic: getRelationId(session.topic),
+		ishtirokchi,
+		ishtirokchiMalumoti,
+		kirishKodi: session.accessCode,
+		qurilmaKaliti,
+		vaqtLimitMinut,
+		tugashVaqti: new Date(Date.now() + vaqtLimitMinut * 60 * 1000),
+		savollar: preparedQuestions.map(question => ({
+			savolId: question._id,
+			savolMatni: question.prompt,
+			variantlar: question.options,
+			togriJavob: question.correctAnswer,
+			izoh: question.explanation,
+			qiyinlik: question.difficulty,
+			tartib: question.order,
+			ball: question.points,
+		})),
+		natija: {
+			jamiSavollar: natija.jamiSavollar,
+			umumiyBall: natija.umumiyBall,
+		},
+	})
+
+	const urinishWithRelations = await TestAttempt.findById(urinish._id)
+		.populate('subject', 'name')
+		.populate('topic', 'title')
+		.populate('testSession')
+		.lean()
+
+	return {
+		status: 201,
+		xabar: 'Kod tasdiqlandi va test boshlandi',
+		urinish: urinishFormatla(urinishWithRelations, { savollarniQosh: true }),
+	}
 }
 
 function generateAccessCode() {
@@ -526,6 +684,28 @@ function testSessionFormatla(session) {
 		yopilganVaqt: session.closedAt,
 		yaratilganVaqt: session.createdAt,
 	}
+}
+
+async function getFaolSessiyaByMavzu(mavzuId) {
+	const session = await TestSession.findOne({
+		topic: mavzuId,
+		status: 'active',
+	})
+		.populate('subject', 'name isActive')
+		.populate('topic', 'title isActive')
+		.populate('createdBy', 'firstName lastName fullName role organizationName')
+		.sort({ startedAt: -1, createdAt: -1, _id: -1 })
+		.lean()
+
+	if (!session || !session.topic || !session.subject) {
+		return null
+	}
+
+	if (session.subject.isActive === false || session.topic.isActive === false) {
+		return null
+	}
+
+	return session
 }
 
 async function yakunlaUrinish(urinish, yakunlashSababi = 'foydalanuvchi') {
@@ -901,6 +1081,105 @@ router.get(['/auth/men', '/auth/me'], async (req, res) => {
 	})
 })
 
+router.patch(
+	['/auth/profil', '/auth/profile', '/auth/men', '/auth/me'],
+	async (req, res) => {
+		const user = await getAuthorizedStaff(req, { required: true })
+		let yangilandi = false
+
+		if (req.body.ism !== undefined || req.body.firstName !== undefined) {
+			const ism = getText(req.body, 'ism', 'firstName')
+			if (!ism) {
+				throw createHttpError(400, 'Ism bo‘sh bo‘lishi mumkin emas')
+			}
+			user.firstName = ism
+			yangilandi = true
+		}
+
+		if (req.body.familiya !== undefined || req.body.lastName !== undefined) {
+			const familiya = getText(req.body, 'familiya', 'lastName')
+			if (!familiya) {
+				throw createHttpError(400, 'Familiya bo‘sh bo‘lishi mumkin emas')
+			}
+			user.lastName = familiya
+			yangilandi = true
+		}
+
+		if (
+			req.body.telefonRaqami !== undefined ||
+			req.body.phoneNumber !== undefined ||
+			req.body.phone !== undefined
+		) {
+			const telefonRaqami = normalizePhoneNumber(
+				req.body.telefonRaqami ?? req.body.phoneNumber ?? req.body.phone,
+			)
+			if (!telefonRaqami) {
+				throw createHttpError(400, 'Telefon raqami bo‘sh bo‘lishi mumkin emas')
+			}
+
+			const boshqaXodim = await User.findOne({
+				_id: { $ne: user._id },
+				phoneNumber: telefonRaqami,
+			})
+			if (boshqaXodim) {
+				throw createHttpError(409, 'Bu telefon raqami boshqa xodimga tegishli')
+			}
+
+			user.phoneNumber = telefonRaqami
+			yangilandi = true
+		}
+
+		if (
+			req.body.tuzilmaNomi !== undefined ||
+			req.body.organizationName !== undefined
+		) {
+			const tuzilmaNomi = String(
+				req.body.tuzilmaNomi ?? req.body.organizationName ?? '',
+			).trim()
+			if (!tuzilmaNomi) {
+				throw createHttpError(400, 'Tuzilma nomi bo‘sh bo‘lishi mumkin emas')
+			}
+			user.organizationName = tuzilmaNomi
+			yangilandi = true
+		}
+
+		if (req.body.email !== undefined) {
+			user.email = String(req.body.email || '')
+				.trim()
+				.toLowerCase()
+			yangilandi = true
+		}
+
+		if (req.body.parol !== undefined || req.body.password !== undefined) {
+			const parol = getText(req.body, 'parol', 'password')
+			if (!parol) {
+				throw createHttpError(400, 'Parol bo‘sh bo‘lishi mumkin emas')
+			}
+			if (parol.length < 4) {
+				throw createHttpError(
+					400,
+					'Parol kamida 4 ta belgidan iborat bo‘lishi kerak',
+				)
+			}
+			user.password = parol
+			yangilandi = true
+		}
+
+		if (!yangilandi) {
+			throw createHttpError(
+				400,
+				'Yangilash uchun kamida bitta profil maydoni yuborilishi kerak',
+			)
+		}
+
+		await user.save()
+
+		return yubor(res, 200, 'Profil muvaffaqiyatli yangilandi', {
+			xodim: xodimFormatla(user),
+		})
+	},
+)
+
 router.post(
 	['/test-sessiyalar/boshlash', '/testlar/sessiyalar/boshlash'],
 	async (req, res) => {
@@ -1046,16 +1325,11 @@ router.get('/test-sessiyalar/faol', async (req, res) => {
 router.post(
 	['/test-sessiyalar/kod-bilan-kirish', '/testlar/kod-bilan-kirish'],
 	async (req, res) => {
-		const ishtirokchiMalumoti = buildParticipantInfo(req.body)
-		const accessCode = String(
-			req.body.kod ??
-				req.body.accessCode ??
-				req.body.code ??
-				req.body.oltiXonaliKod ??
-				'',
-		)
-			.trim()
-			.replace(/\s+/g, '')
+		const ishtirokchiMalumoti = buildParticipantInfo(req.body, {
+			strict: false,
+		})
+		const ishtirokchi = getParticipantName(req.body, ishtirokchiMalumoti)
+		const accessCode = extractAccessCode(req.body)
 
 		if (!/^\d{6}$/.test(accessCode)) {
 			throw createHttpError(400, 'Kod 6 xonali raqam bo‘lishi kerak')
@@ -1085,61 +1359,17 @@ router.post(
 			throw createHttpError(404, 'Bu kodga bog‘langan test hozir faol emas')
 		}
 
-		const questions = await Question.find({
-			topic: getRelationId(session.topic),
-			isActive: true,
-		})
-			.sort({ order: 1, createdAt: 1 })
-			.limit(session.questionCount || 20)
-			.lean()
-
-		if (!questions.length) {
-			throw createHttpError(404, 'Testni boshlash uchun savollar topilmadi')
-		}
-
-		const preparedQuestions = session.shuffleQuestions
-			? shuffleArray(questions)
-			: questions
-		const natija = natijaHisobla(preparedQuestions, new Map())
-		const vaqtLimitMinut = Math.max(1, toNumber(session.durationMinutes, 30))
-
-		const urinish = await TestAttempt.create({
-			testSession: session._id,
-			subject: getRelationId(session.subject),
-			topic: getRelationId(session.topic),
-			ishtirokchi: fullNameFromParts(
-				ishtirokchiMalumoti.ism,
-				ishtirokchiMalumoti.familiya,
-			),
+		const natija = await createOrContinueSessionAttempt({
+			req,
+			session,
 			ishtirokchiMalumoti,
-			kirishKodi: session.accessCode,
-			vaqtLimitMinut,
-			tugashVaqti: new Date(Date.now() + vaqtLimitMinut * 60 * 1000),
-			savollar: preparedQuestions.map(question => ({
-				savolId: question._id,
-				savolMatni: question.prompt,
-				variantlar: question.options,
-				togriJavob: question.correctAnswer,
-				izoh: question.explanation,
-				qiyinlik: question.difficulty,
-				tartib: question.order,
-				ball: question.points,
-			})),
-			natija: {
-				jamiSavollar: natija.jamiSavollar,
-				umumiyBall: natija.umumiyBall,
-			},
+			ishtirokchi,
 		})
 
-		const urinishWithRelations = await TestAttempt.findById(urinish._id)
-			.populate('subject', 'name')
-			.populate('topic', 'title')
-			.populate('testSession')
-			.lean()
-
-		return yubor(res, 201, 'Kod tasdiqlandi va test boshlandi', {
+		return yubor(res, natija.status, natija.xabar, {
+			kodOrqali: true,
 			testSessiya: testSessionFormatla(session),
-			urinish: urinishFormatla(urinishWithRelations, { savollarniQosh: true }),
+			urinish: natija.urinish,
 		})
 	},
 )
@@ -1155,7 +1385,58 @@ router.post(
  *     summary: Yangi fan yaratish
  */
 router.get(['/fanlar', '/subjects'], async (req, res) => {
-	const subjects = await Subject.find().sort({ createdAt: -1 }).lean()
+	const sahifa = Math.max(
+		1,
+		Math.trunc(toNumber(req.query.sahifa ?? req.query.page, 1)),
+	)
+	const limit = Math.min(
+		Math.max(
+			Math.trunc(toNumber(req.query.harSahifadagiSoni ?? req.query.limit, 10)),
+			1,
+		),
+		100,
+	)
+	const qidiruvMatni = String(
+		req.query.matn ?? req.query.q ?? req.query.search ?? '',
+	).trim()
+	const saralashMaydoni = String(
+		req.query.saralashMaydoni ?? req.query.sortBy ?? 'yaratilganVaqt',
+	).trim()
+	const yonalish =
+		String(
+			req.query.yonalish ?? req.query.sortOrder ?? req.query.tartib ?? 'desc',
+		)
+			.trim()
+			.toLowerCase() === 'asc'
+			? 1
+			: -1
+	const sortByMap = {
+		nomi: 'name',
+		yaratilganVaqt: 'createdAt',
+		yangilanganVaqt: 'updatedAt',
+	}
+	const filter = {}
+
+	if (req.query.faol !== undefined || req.query.isActive !== undefined) {
+		filter.isActive = toBoolean(req.query.faol ?? req.query.isActive, true)
+	}
+
+	if (qidiruvMatni) {
+		const regex = new RegExp(escapeRegex(qidiruvMatni), 'i')
+		filter.$or = [{ name: regex }, { description: regex }]
+	}
+
+	const sortBy = sortByMap[saralashMaydoni] || 'createdAt'
+	const skip = (sahifa - 1) * limit
+
+	const [jami, subjects] = await Promise.all([
+		Subject.countDocuments(filter),
+		Subject.find(filter)
+			.sort({ [sortBy]: yonalish, _id: -1 })
+			.skip(skip)
+			.limit(limit)
+			.lean(),
+	])
 	const subjectIds = subjects.map(subject => subject._id)
 
 	const [topicCounts, questionCounts] = await Promise.all([
@@ -1179,9 +1460,28 @@ router.get(['/fanlar', '/subjects'], async (req, res) => {
 	const questionMap = new Map(
 		questionCounts.map(item => [String(item._id), item.totalQuestions]),
 	)
+	const jamiSahifalar = Math.max(Math.ceil(jami / limit), 1)
 
 	return yubor(res, 200, 'Fanlar ro‘yxati olindi', {
-		jami: subjects.length,
+		qidiruv: {
+			matn: qidiruvMatni,
+			faol:
+				req.query.faol !== undefined || req.query.isActive !== undefined
+					? filter.isActive
+					: null,
+		},
+		sahifalash: {
+			jami,
+			sahifa,
+			harSahifadagiSoni: limit,
+			jamiSahifalar,
+			keyingiSahifaBor: sahifa < jamiSahifalar,
+			oldingiSahifaBor: sahifa > 1,
+		},
+		tartiblash: {
+			maydon: sortByMap[saralashMaydoni] ? saralashMaydoni : 'yaratilganVaqt',
+			yonalish: yonalish === 1 ? 'asc' : 'desc',
+		},
 		fanlar: subjects.map(subject =>
 			fanFormatla(subject, {
 				mavzularSoni: topicMap.get(String(subject._id)) || 0,
@@ -1218,7 +1518,7 @@ router.get(['/fanlar/:fanId', '/subjects/:fanId'], async (req, res) => {
 	}
 
 	const topics = await Topic.find({ subject: subject._id })
-		.sort({ order: 1, createdAt: 1 })
+		.sort({ createdAt: -1, _id: -1 })
 		.lean()
 
 	const topicIds = topics.map(topic => topic._id)
@@ -1324,9 +1624,63 @@ router.get(
 			throw createHttpError(404, 'Fan topilmadi')
 		}
 
-		const topics = await Topic.find({ subject: subject._id })
-			.sort({ order: 1, createdAt: 1 })
-			.lean()
+		const sahifa = Math.max(
+			1,
+			Math.trunc(toNumber(req.query.sahifa ?? req.query.page, 1)),
+		)
+		const limit = Math.min(
+			Math.max(
+				Math.trunc(
+					toNumber(req.query.harSahifadagiSoni ?? req.query.limit, 10),
+				),
+				1,
+			),
+			100,
+		)
+		const qidiruvMatni = String(
+			req.query.matn ?? req.query.q ?? req.query.search ?? '',
+		).trim()
+		const saralashMaydoni = String(
+			req.query.saralashMaydoni ?? req.query.sortBy ?? 'yaratilganVaqt',
+		).trim()
+		const yonalish =
+			String(
+				req.query.yonalish ?? req.query.sortOrder ?? req.query.tartib ?? 'desc',
+			)
+				.trim()
+				.toLowerCase() === 'asc'
+				? 1
+				: -1
+		const topicFilter = { subject: subject._id }
+
+		if (req.query.faol !== undefined || req.query.isActive !== undefined) {
+			topicFilter.isActive = toBoolean(
+				req.query.faol ?? req.query.isActive,
+				true,
+			)
+		}
+
+		if (qidiruvMatni) {
+			const regex = new RegExp(escapeRegex(qidiruvMatni), 'i')
+			topicFilter.$or = [{ title: regex }, { description: regex }]
+		}
+
+		const sortByMap = {
+			nomi: 'title',
+			yaratilganVaqt: 'createdAt',
+			yangilanganVaqt: 'updatedAt',
+		}
+		const sortBy = sortByMap[saralashMaydoni] || 'createdAt'
+		const skip = (sahifa - 1) * limit
+
+		const [jami, topics] = await Promise.all([
+			Topic.countDocuments(topicFilter),
+			Topic.find(topicFilter)
+				.sort({ [sortBy]: yonalish, _id: -1 })
+				.skip(skip)
+				.limit(limit)
+				.lean(),
+		])
 
 		const topicIds = topics.map(topic => topic._id)
 		const questionCounts = topicIds.length
@@ -1339,15 +1693,35 @@ router.get(
 		const questionMap = new Map(
 			questionCounts.map(item => [String(item._id), item.totalQuestions]),
 		)
+		const jamiSahifalar = Math.max(Math.ceil(jami / limit), 1)
 
 		return yubor(res, 200, 'Mavzular ro‘yxati olindi', {
 			fan: fanFormatla(subject, {
-				mavzularSoni: topics.length,
+				mavzularSoni: jami,
 				savollarSoni: questionCounts.reduce(
 					(sum, item) => sum + item.totalQuestions,
 					0,
 				),
 			}),
+			qidiruv: {
+				matn: qidiruvMatni,
+				faol:
+					req.query.faol !== undefined || req.query.isActive !== undefined
+						? topicFilter.isActive
+						: null,
+			},
+			sahifalash: {
+				jami,
+				sahifa,
+				harSahifadagiSoni: limit,
+				jamiSahifalar,
+				keyingiSahifaBor: sahifa < jamiSahifalar,
+				oldingiSahifaBor: sahifa > 1,
+			},
+			tartiblash: {
+				maydon: sortByMap[saralashMaydoni] ? saralashMaydoni : 'yaratilganVaqt',
+				yonalish: yonalish === 1 ? 'asc' : 'desc',
+			},
 			mavzular: topics.map(topic =>
 				mavzuFormatla(topic, {
 					fanNomi: subject.name,
@@ -1377,7 +1751,6 @@ router.post(
 			subject: subject._id,
 			title: nomi,
 			description: getText(req.body, 'tavsif', 'description'),
-			order: toNumber(req.body.tartib ?? req.body.order, 0),
 			isActive: toBoolean(req.body.faol ?? req.body.isActive, true),
 		})
 
@@ -1477,12 +1850,94 @@ router.get(
 			throw createHttpError(404, 'Mavzu topilmadi')
 		}
 
-		const questions = await Question.find({ topic: topic._id })
-			.sort({ order: 1, createdAt: 1 })
-			.lean()
+		const sahifa = Math.max(
+			1,
+			Math.trunc(toNumber(req.query.sahifa ?? req.query.page, 1)),
+		)
+		const limit = Math.min(
+			Math.max(
+				Math.trunc(
+					toNumber(req.query.harSahifadagiSoni ?? req.query.limit, 10),
+				),
+				1,
+			),
+			100,
+		)
+		const qidiruvMatni = String(
+			req.query.matn ?? req.query.q ?? req.query.search ?? '',
+		).trim()
+		const saralashMaydoni = String(
+			req.query.saralashMaydoni ?? req.query.sortBy ?? 'yaratilganVaqt',
+		).trim()
+		const yonalish =
+			String(
+				req.query.yonalish ?? req.query.sortOrder ?? req.query.tartib ?? 'desc',
+			)
+				.trim()
+				.toLowerCase() === 'asc'
+				? 1
+				: -1
+		const filter = { topic: topic._id }
+
+		if (req.query.faol !== undefined || req.query.isActive !== undefined) {
+			filter.isActive = toBoolean(req.query.faol ?? req.query.isActive, true)
+		}
+
+		if (qidiruvMatni) {
+			const regex = new RegExp(escapeRegex(qidiruvMatni), 'i')
+			filter.$or = [
+				{ prompt: regex },
+				{ explanation: regex },
+				{ correctAnswer: regex },
+				{ difficulty: regex },
+				{ 'options.a': regex },
+				{ 'options.b': regex },
+				{ 'options.c': regex },
+				{ 'options.d': regex },
+			]
+		}
+
+		const sortByMap = {
+			tartib: 'order',
+			yaratilganVaqt: 'createdAt',
+			yangilanganVaqt: 'updatedAt',
+			ball: 'points',
+			qiyinlik: 'difficulty',
+		}
+		const sortBy = sortByMap[saralashMaydoni] || 'createdAt'
+		const skip = (sahifa - 1) * limit
+
+		const [jami, questions] = await Promise.all([
+			Question.countDocuments(filter),
+			Question.find(filter)
+				.sort({ [sortBy]: yonalish, _id: -1 })
+				.skip(skip)
+				.limit(limit)
+				.lean(),
+		])
+		const jamiSahifalar = Math.max(Math.ceil(jami / limit), 1)
 
 		return yubor(res, 200, 'Savollar ro‘yxati olindi', {
 			mavzu: mavzuFormatla(topic, { fanNomi: getRelationName(topic.subject) }),
+			qidiruv: {
+				matn: qidiruvMatni,
+				faol:
+					req.query.faol !== undefined || req.query.isActive !== undefined
+						? filter.isActive
+						: null,
+			},
+			sahifalash: {
+				jami,
+				sahifa,
+				harSahifadagiSoni: limit,
+				jamiSahifalar,
+				keyingiSahifaBor: sahifa < jamiSahifalar,
+				oldingiSahifaBor: sahifa > 1,
+			},
+			tartiblash: {
+				maydon: sortByMap[saralashMaydoni] ? saralashMaydoni : 'yaratilganVaqt',
+				yonalish: yonalish === 1 ? 'asc' : 'desc',
+			},
 			savollar: questions.map(question => savolFormatla(question)),
 		})
 	},
@@ -1602,10 +2057,13 @@ router.get(
 				req.query.aralashtir ?? req.query.shuffle ?? 'false',
 			).toLowerCase() === 'true'
 
-		const questions = await Question.find({ topic: topic._id, isActive: true })
-			.sort({ order: 1, createdAt: 1 })
-			.limit(limit)
-			.lean()
+		const [questions, faolSessiya] = await Promise.all([
+			Question.find({ topic: topic._id, isActive: true })
+				.sort({ order: 1, createdAt: 1 })
+				.limit(limit)
+				.lean(),
+			getFaolSessiyaByMavzu(topic._id),
+		])
 
 		if (!questions.length) {
 			throw createHttpError(
@@ -1620,6 +2078,7 @@ router.get(
 
 		return yubor(res, 200, 'Test savollari tayyorlandi', {
 			mavzu: mavzuFormatla(topic, { fanNomi: getRelationName(topic.subject) }),
+			faolSessiya: faolSessiya ? testSessionFormatla(faolSessiya) : null,
 			jamiSavollar: preparedQuestions.length,
 			savollar: preparedQuestions.map(question =>
 				savolFormatla(question, { testRejimi: true }),
@@ -1747,9 +2206,54 @@ router.post(
 )
 
 router.get('/testlar/fanlar', async (req, res) => {
-	const subjects = await Subject.find({ isActive: true })
-		.sort({ name: 1 })
-		.lean()
+	const sahifa = Math.max(
+		1,
+		Math.trunc(toNumber(req.query.sahifa ?? req.query.page, 1)),
+	)
+	const limit = Math.min(
+		Math.max(
+			Math.trunc(toNumber(req.query.harSahifadagiSoni ?? req.query.limit, 10)),
+			1,
+		),
+		100,
+	)
+	const qidiruvMatni = String(
+		req.query.matn ?? req.query.q ?? req.query.search ?? '',
+	).trim()
+	const saralashMaydoni = String(
+		req.query.saralashMaydoni ?? req.query.sortBy ?? 'nomi',
+	).trim()
+	const yonalish =
+		String(
+			req.query.yonalish ?? req.query.sortOrder ?? req.query.tartib ?? 'asc',
+		)
+			.trim()
+			.toLowerCase() === 'desc'
+			? -1
+			: 1
+	const filter = { isActive: true }
+
+	if (qidiruvMatni) {
+		const regex = new RegExp(escapeRegex(qidiruvMatni), 'i')
+		filter.$or = [{ name: regex }, { description: regex }]
+	}
+
+	const sortByMap = {
+		nomi: 'name',
+		yaratilganVaqt: 'createdAt',
+		yangilanganVaqt: 'updatedAt',
+	}
+	const sortBy = sortByMap[saralashMaydoni] || 'name'
+	const skip = (sahifa - 1) * limit
+
+	const [jami, subjects] = await Promise.all([
+		Subject.countDocuments(filter),
+		Subject.find(filter)
+			.sort({ [sortBy]: yonalish, _id: -1 })
+			.skip(skip)
+			.limit(limit)
+			.lean(),
+	])
 	const subjectIds = subjects.map(subject => subject._id)
 
 	const [topicCounts, questionCounts] = await Promise.all([
@@ -1773,8 +2277,25 @@ router.get('/testlar/fanlar', async (req, res) => {
 	const questionMap = new Map(
 		questionCounts.map(item => [String(item._id), item.totalQuestions]),
 	)
+	const jamiSahifalar = Math.max(Math.ceil(jami / limit), 1)
 
 	return yubor(res, 200, 'Test ishlash uchun fanlar ro‘yxati tayyor', {
+		qidiruv: {
+			matn: qidiruvMatni,
+			faol: true,
+		},
+		sahifalash: {
+			jami,
+			sahifa,
+			harSahifadagiSoni: limit,
+			jamiSahifalar,
+			keyingiSahifaBor: sahifa < jamiSahifalar,
+			oldingiSahifaBor: sahifa > 1,
+		},
+		tartiblash: {
+			maydon: sortByMap[saralashMaydoni] ? saralashMaydoni : 'nomi',
+			yonalish: yonalish === 1 ? 'asc' : 'desc',
+		},
 		fanlar: subjects.map(subject =>
 			fanFormatla(subject, {
 				mavzularSoni: topicMap.get(String(subject._id)) || 0,
@@ -1795,9 +2316,54 @@ router.get('/testlar/fanlar/:fanId/mavzular', async (req, res) => {
 		throw createHttpError(404, 'Fan topilmadi yoki faol emas')
 	}
 
-	const topics = await Topic.find({ subject: subject._id, isActive: true })
-		.sort({ order: 1, createdAt: 1 })
-		.lean()
+	const sahifa = Math.max(
+		1,
+		Math.trunc(toNumber(req.query.sahifa ?? req.query.page, 1)),
+	)
+	const limit = Math.min(
+		Math.max(
+			Math.trunc(toNumber(req.query.harSahifadagiSoni ?? req.query.limit, 10)),
+			1,
+		),
+		100,
+	)
+	const qidiruvMatni = String(
+		req.query.matn ?? req.query.q ?? req.query.search ?? '',
+	).trim()
+	const saralashMaydoni = String(
+		req.query.saralashMaydoni ?? req.query.sortBy ?? 'yaratilganVaqt',
+	).trim()
+	const yonalish =
+		String(
+			req.query.yonalish ?? req.query.sortOrder ?? req.query.tartib ?? 'desc',
+		)
+			.trim()
+			.toLowerCase() === 'asc'
+			? 1
+			: -1
+	const filter = { subject: subject._id, isActive: true }
+
+	if (qidiruvMatni) {
+		const regex = new RegExp(escapeRegex(qidiruvMatni), 'i')
+		filter.$or = [{ title: regex }, { description: regex }]
+	}
+
+	const sortByMap = {
+		nomi: 'title',
+		yaratilganVaqt: 'createdAt',
+		yangilanganVaqt: 'updatedAt',
+	}
+	const sortBy = sortByMap[saralashMaydoni] || 'createdAt'
+	const skip = (sahifa - 1) * limit
+
+	const [jami, topics] = await Promise.all([
+		Topic.countDocuments(filter),
+		Topic.find(filter)
+			.sort({ [sortBy]: yonalish, _id: -1 })
+			.skip(skip)
+			.limit(limit)
+			.lean(),
+	])
 
 	const topicIds = topics.map(topic => topic._id)
 	const questionCounts = topicIds.length
@@ -1810,15 +2376,32 @@ router.get('/testlar/fanlar/:fanId/mavzular', async (req, res) => {
 	const questionMap = new Map(
 		questionCounts.map(item => [String(item._id), item.totalQuestions]),
 	)
+	const jamiSahifalar = Math.max(Math.ceil(jami / limit), 1)
 
 	return yubor(res, 200, 'Test ishlash uchun mavzular ro‘yxati tayyor', {
 		fan: fanFormatla(subject, {
-			mavzularSoni: topics.length,
+			mavzularSoni: jami,
 			savollarSoni: questionCounts.reduce(
 				(sum, item) => sum + item.totalQuestions,
 				0,
 			),
 		}),
+		qidiruv: {
+			matn: qidiruvMatni,
+			faol: true,
+		},
+		sahifalash: {
+			jami,
+			sahifa,
+			harSahifadagiSoni: limit,
+			jamiSahifalar,
+			keyingiSahifaBor: sahifa < jamiSahifalar,
+			oldingiSahifaBor: sahifa > 1,
+		},
+		tartiblash: {
+			maydon: sortByMap[saralashMaydoni] ? saralashMaydoni : 'yaratilganVaqt',
+			yonalish: yonalish === 1 ? 'asc' : 'desc',
+		},
 		mavzular: topics.map(topic =>
 			mavzuFormatla(topic, {
 				fanNomi: subject.name,
@@ -1838,10 +2421,13 @@ router.get('/testlar/mavzular/:mavzuId', async (req, res) => {
 		throw createHttpError(404, 'Mavzu topilmadi yoki test uchun faol emas')
 	}
 
-	const savollarSoni = await Question.countDocuments({
-		topic: topic._id,
-		isActive: true,
-	})
+	const [savollarSoni, faolSessiya] = await Promise.all([
+		Question.countDocuments({
+			topic: topic._id,
+			isActive: true,
+		}),
+		getFaolSessiyaByMavzu(topic._id),
+	])
 
 	return yubor(res, 200, 'Mavzu test ishlash uchun tayyor', {
 		mavzu: mavzuFormatla(topic, {
@@ -1849,6 +2435,7 @@ router.get('/testlar/mavzular/:mavzuId', async (req, res) => {
 			savollarSoni,
 		}),
 		taxminiyVaqtMinut: Math.max(1, savollarSoni),
+		faolSessiya: faolSessiya ? testSessionFormatla(faolSessiya) : null,
 	})
 })
 
@@ -1870,6 +2457,54 @@ router.post('/testlar/mavzular/:mavzuId/boshlash', async (req, res) => {
 		throw createHttpError(404, 'Bu mavzu uchun test savollari topilmadi')
 	}
 
+	const accessCode = extractAccessCode(req.body)
+	const ishtirokchiMalumoti = buildParticipantInfo(req.body, { strict: false })
+	const ishtirokchi = getParticipantName(req.body, ishtirokchiMalumoti)
+
+	if (accessCode) {
+		if (!/^\d{6}$/.test(accessCode)) {
+			throw createHttpError(400, 'Kod 6 xonali raqam bo‘lishi kerak')
+		}
+
+		const session = await TestSession.findOne({
+			accessCode,
+			topic: topic._id,
+			status: 'active',
+		})
+			.populate('subject', 'name isActive')
+			.populate('topic', 'title isActive')
+			.populate(
+				'createdBy',
+				'firstName lastName fullName role organizationName',
+			)
+			.lean()
+
+		if (
+			!session ||
+			!session.topic ||
+			!session.subject ||
+			session.subject.isActive === false
+		) {
+			throw createHttpError(
+				404,
+				'Bu mavzu uchun kiritilgan kod bo‘yicha faol test sessiyasi topilmadi',
+			)
+		}
+
+		const natija = await createOrContinueSessionAttempt({
+			req,
+			session,
+			ishtirokchiMalumoti,
+			ishtirokchi,
+		})
+
+		return yubor(res, natija.status, natija.xabar, {
+			kodOrqali: true,
+			testSessiya: testSessionFormatla(session),
+			urinish: natija.urinish,
+		})
+	}
+
 	const limit = Math.min(
 		Math.max(
 			toNumber(
@@ -1883,11 +2518,6 @@ router.post('/testlar/mavzular/:mavzuId/boshlash', async (req, res) => {
 	const shouldShuffle =
 		String(req.body.aralashtir ?? req.body.shuffle ?? 'true').toLowerCase() ===
 		'true'
-	const ishtirokchiMalumoti = buildParticipantInfo(req.body, { strict: false })
-	const ishtirokchi =
-		getText(req.body, 'ishtirokchi', 'participant') ||
-		fullNameFromParts(ishtirokchiMalumoti.ism, ishtirokchiMalumoti.familiya) ||
-		'Mehmon'
 	const vaqtLimitMinut = Math.min(
 		Math.max(
 			toNumber(

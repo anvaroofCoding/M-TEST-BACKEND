@@ -2,7 +2,19 @@ const swaggerJsdoc = require('swagger-jsdoc')
 const swaggerUi = require('swagger-ui-express')
 
 function setupSwagger(app) {
-	const port = Number(process.env.PORT) || 5000
+	const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || '')
+		.trim()
+		.replace(/\/$/, '')
+	const servers = [
+		{ url: '/', description: 'Joriy server yoki tarmoq manzili' },
+	]
+
+	if (publicBaseUrl) {
+		servers.push({
+			url: publicBaseUrl,
+			description: 'PUBLIC_BASE_URL orqali berilgan manzil',
+		})
+	}
 
 	const specs = swaggerJsdoc({
 		definition: {
@@ -13,12 +25,7 @@ function setupSwagger(app) {
 				description:
 					"Test yechish platformasi uchun to'liq, ishlaydigan va o'zbekcha Swagger hujjatlari.",
 			},
-			servers: [
-				{
-					url: `http://localhost:${port}`,
-					description: 'Mahalliy server',
-				},
-			],
+			servers,
 			tags: [
 				{ name: 'Tizim', description: 'Loyiha holati va umumiy endpointlar' },
 				{
@@ -105,7 +112,6 @@ function setupSwagger(app) {
 						properties: {
 							nomi: { type: 'string', example: 'Kasrlar' },
 							tavsif: { type: 'string', example: "Oddiy va o'nli kasrlar" },
-							tartib: { type: 'number', example: 1 },
 							faol: { type: 'boolean', example: true },
 						},
 					},
@@ -133,10 +139,26 @@ function setupSwagger(app) {
 					},
 					TestBoshlashSorovi: {
 						type: 'object',
+						description:
+							'Ko‘p ishtirokchi bo‘lsa, odatda faqat `kod` va ixtiyoriy `qurilmaId` kifoya qiladi.',
 						properties: {
-							ishtirokchi: { type: 'string', example: 'Ali Valiyev' },
+							kod: {
+								type: 'string',
+								example: '482193',
+								description: 'Admin ochgan faol sessiyaning 6 xonali kodi',
+							},
+							qurilmaId: {
+								type: 'string',
+								example: 'telefon-android-01',
+								description:
+									'Ixtiyoriy. Bir qurilmadan qayta kirganda o‘sha eski urinish davom etadi',
+							},
 							savollarSoni: { type: 'number', example: 10 },
 							aralashtir: { type: 'boolean', example: true },
+						},
+						example: {
+							kod: '482193',
+							qurilmaId: 'telefon-android-01',
 						},
 					},
 					JavobSaqlashSorovi: {
@@ -210,6 +232,17 @@ function setupSwagger(app) {
 							parol: { type: 'string', example: '12345' },
 						},
 					},
+					ProfilTahrirlashSorovi: {
+						type: 'object',
+						properties: {
+							ism: { type: 'string', example: 'Ali' },
+							familiya: { type: 'string', example: 'Valiyev' },
+							telefonRaqami: { type: 'string', example: '+998901234567' },
+							tuzilmaNomi: { type: 'string', example: '1-maktab' },
+							email: { type: 'string', example: 'ali@example.com' },
+							parol: { type: 'string', example: 'yangiParol123' },
+						},
+					},
 					TestSessiyaBoshlashSorovi: {
 						type: 'object',
 						required: ['mavzuId', 'vaqtMinut'],
@@ -224,19 +257,25 @@ function setupSwagger(app) {
 					},
 					KodBilanKirishSorovi: {
 						type: 'object',
-						required: [
-							'ism',
-							'familiya',
-							'telefonRaqami',
-							'tuzilmaNomi',
-							'kod',
-						],
+						required: ['kod'],
+						description:
+							'Ko‘p ishtirokchi kiradigan oqim uchun minimal so‘rov: `kod` va ixtiyoriy `qurilmaId`.',
 						properties: {
-							ism: { type: 'string', example: 'Bekzod' },
-							familiya: { type: 'string', example: 'Karimov' },
-							telefonRaqami: { type: 'string', example: '+998991112233' },
-							tuzilmaNomi: { type: 'string', example: '1-maktab' },
-							kod: { type: 'string', example: '482193' },
+							kod: {
+								type: 'string',
+								example: '482193',
+								description: '6 xonali test kodi',
+							},
+							qurilmaId: {
+								type: 'string',
+								example: 'telefon-android-01',
+								description:
+									'Ixtiyoriy. Bir qurilmadan qayta kirganda o‘sha eski urinish davom etadi',
+							},
+						},
+						example: {
+							kod: '482193',
+							qurilmaId: 'telefon-android-01',
 						},
 					},
 				},
@@ -302,6 +341,26 @@ function setupSwagger(app) {
 							401: { description: 'Token noto‘g‘ri yoki muddati tugagan' },
 						},
 					},
+					patch: {
+						tags: ['Autentifikatsiya'],
+						summary:
+							'Faqat login qilgan admin yoki tuzilma rahbari o‘z profilini tahrirlaydi',
+						security: [{ bearerAuth: [] }],
+						requestBody: {
+							required: true,
+							content: {
+								'application/json': {
+									schema: {
+										$ref: '#/components/schemas/ProfilTahrirlashSorovi',
+									},
+								},
+							},
+						},
+						responses: {
+							200: { description: 'Profil muvaffaqiyatli yangilandi' },
+							401: { description: 'Token talab qilinadi' },
+						},
+					},
 				},
 				'/api/test-sessiyalar/boshlash': {
 					post: {
@@ -351,7 +410,10 @@ function setupSwagger(app) {
 				'/api/test-sessiyalar/kod-bilan-kirish': {
 					post: {
 						tags: ['Test sessiyalari'],
-						summary: 'Test yechuvchi 6 xonali kod bilan kirib testni boshlaydi',
+						summary:
+							'Test yechuvchi 6 xonali kod bilan kirib testni boshlaydi yoki davom ettiradi',
+						description:
+							'Faqat `kod` yuborish kifoya. `qurilmaId` yoki `telefonRaqami` yuborilsa, shu ishtirokchi uchun bir martalik cheklov ishlaydi.',
 						requestBody: {
 							required: true,
 							content: {
@@ -361,14 +423,62 @@ function setupSwagger(app) {
 							},
 						},
 						responses: {
-							201: { description: 'Kod tasdiqlandi va test boshlandi' },
+							200: { description: 'Avval boshlangan test davom ettirildi' },
+							201: { description: 'Kod tasdiqlandi va yangi test boshlandi' },
+							409: { description: 'Bu kod bilan test allaqachon yakunlangan' },
 						},
 					},
 				},
 				'/api/fanlar': {
 					get: {
 						tags: ['Fanlar'],
-						summary: 'Barcha fanlarni olish',
+						summary: 'Barcha fanlarni search va pagination bilan olish',
+						parameters: [
+							{
+								name: 'matn',
+								in: 'query',
+								schema: { type: 'string', example: 'matematika' },
+								description: 'Fan nomi yoki tavsifi bo‘yicha qidiruv',
+							},
+							{
+								name: 'sahifa',
+								in: 'query',
+								schema: { type: 'number', example: 1 },
+								description: 'Sahifa raqami',
+							},
+							{
+								name: 'harSahifadagiSoni',
+								in: 'query',
+								schema: { type: 'number', example: 10 },
+								description: 'Har sahifadagi fanlar soni',
+							},
+							{
+								name: 'faol',
+								in: 'query',
+								schema: { type: 'boolean', example: true },
+								description: 'Faollik bo‘yicha filter',
+							},
+							{
+								name: 'saralashMaydoni',
+								in: 'query',
+								schema: {
+									type: 'string',
+									enum: ['nomi', 'yaratilganVaqt', 'yangilanganVaqt'],
+									example: 'yaratilganVaqt',
+								},
+								description: 'Saralash maydoni',
+							},
+							{
+								name: 'yonalish',
+								in: 'query',
+								schema: {
+									type: 'string',
+									enum: ['asc', 'desc'],
+									example: 'desc',
+								},
+								description: 'Saralash yo‘nalishi',
+							},
+						],
 						responses: {
 							200: { description: 'Fanlar ro‘yxati qaytdi' },
 						},
@@ -420,8 +530,54 @@ function setupSwagger(app) {
 				'/api/fanlar/{fanId}/mavzular': {
 					get: {
 						tags: ['Mavzular'],
-						summary: 'Fan ichidagi mavzularni olish',
-						parameters: [{ $ref: '#/components/parameters/FanId' }],
+						summary: 'Fan ichidagi mavzularni search va pagination bilan olish',
+						parameters: [
+							{ $ref: '#/components/parameters/FanId' },
+							{
+								name: 'matn',
+								in: 'query',
+								schema: { type: 'string', example: 'kasr' },
+								description: 'Mavzu nomi yoki tavsifi bo‘yicha qidiruv',
+							},
+							{
+								name: 'sahifa',
+								in: 'query',
+								schema: { type: 'number', example: 1 },
+								description: 'Sahifa raqami',
+							},
+							{
+								name: 'harSahifadagiSoni',
+								in: 'query',
+								schema: { type: 'number', example: 10 },
+								description: 'Har sahifadagi mavzular soni',
+							},
+							{
+								name: 'faol',
+								in: 'query',
+								schema: { type: 'boolean', example: true },
+								description: 'Faollik bo‘yicha filter',
+							},
+							{
+								name: 'saralashMaydoni',
+								in: 'query',
+								schema: {
+									type: 'string',
+									enum: ['nomi', 'yaratilganVaqt', 'yangilanganVaqt'],
+									example: 'yaratilganVaqt',
+								},
+								description: 'Saralash maydoni',
+							},
+							{
+								name: 'yonalish',
+								in: 'query',
+								schema: {
+									type: 'string',
+									enum: ['asc', 'desc'],
+									example: 'desc',
+								},
+								description: 'Saralash yo‘nalishi',
+							},
+						],
 						responses: { 200: { description: 'Mavzular ro‘yxati qaytdi' } },
 					},
 					post: {
@@ -470,8 +626,62 @@ function setupSwagger(app) {
 				'/api/mavzular/{mavzuId}/savollar': {
 					get: {
 						tags: ['Savollar'],
-						summary: 'Mavzu ichidagi savollarni olish',
-						parameters: [{ $ref: '#/components/parameters/MavzuId' }],
+						summary:
+							'Mavzu ichidagi savollarni search va pagination bilan olish',
+						parameters: [
+							{ $ref: '#/components/parameters/MavzuId' },
+							{
+								name: 'matn',
+								in: 'query',
+								schema: { type: 'string', example: '2 + 2' },
+								description:
+									'Savol matni, izoh yoki variantlar bo‘yicha qidiruv',
+							},
+							{
+								name: 'sahifa',
+								in: 'query',
+								schema: { type: 'number', example: 1 },
+								description: 'Sahifa raqami',
+							},
+							{
+								name: 'harSahifadagiSoni',
+								in: 'query',
+								schema: { type: 'number', example: 10 },
+								description: 'Har sahifadagi savollar soni',
+							},
+							{
+								name: 'faol',
+								in: 'query',
+								schema: { type: 'boolean', example: true },
+								description: 'Faollik bo‘yicha filter',
+							},
+							{
+								name: 'saralashMaydoni',
+								in: 'query',
+								schema: {
+									type: 'string',
+									enum: [
+										'tartib',
+										'yaratilganVaqt',
+										'yangilanganVaqt',
+										'ball',
+										'qiyinlik',
+									],
+									example: 'yaratilganVaqt',
+								},
+								description: 'Saralash maydoni',
+							},
+							{
+								name: 'yonalish',
+								in: 'query',
+								schema: {
+									type: 'string',
+									enum: ['asc', 'desc'],
+									example: 'desc',
+								},
+								description: 'Saralash yo‘nalishi',
+							},
+						],
 						responses: { 200: { description: 'Savollar ro‘yxati qaytdi' } },
 					},
 					post: {
@@ -615,22 +825,107 @@ function setupSwagger(app) {
 				'/api/testlar/fanlar': {
 					get: {
 						tags: ['Testlar'],
-						summary: 'Test ishlash uchun faol fanlar ro‘yxatini olish',
+						summary:
+							'Test ishlash uchun faol fanlarni search va pagination bilan olish',
+						parameters: [
+							{
+								name: 'matn',
+								in: 'query',
+								schema: { type: 'string', example: 'matematika' },
+								description: 'Fan nomi yoki tavsifi bo‘yicha qidiruv',
+							},
+							{
+								name: 'sahifa',
+								in: 'query',
+								schema: { type: 'number', example: 1 },
+								description: 'Sahifa raqami',
+							},
+							{
+								name: 'harSahifadagiSoni',
+								in: 'query',
+								schema: { type: 'number', example: 10 },
+								description: 'Har sahifadagi fanlar soni',
+							},
+							{
+								name: 'saralashMaydoni',
+								in: 'query',
+								schema: {
+									type: 'string',
+									enum: ['nomi', 'yaratilganVaqt', 'yangilanganVaqt'],
+									example: 'nomi',
+								},
+								description: 'Saralash maydoni',
+							},
+							{
+								name: 'yonalish',
+								in: 'query',
+								schema: {
+									type: 'string',
+									enum: ['asc', 'desc'],
+									example: 'asc',
+								},
+								description: 'Saralash yo‘nalishi',
+							},
+						],
 						responses: { 200: { description: 'Faol fanlar ro‘yxati qaytdi' } },
 					},
 				},
 				'/api/testlar/fanlar/{fanId}/mavzular': {
 					get: {
 						tags: ['Testlar'],
-						summary: 'Tanlangan fan ichidagi test mavzularini olish',
-						parameters: [{ $ref: '#/components/parameters/FanId' }],
+						summary:
+							'Tanlangan fan ichidagi test mavzularini search va pagination bilan olish',
+						parameters: [
+							{ $ref: '#/components/parameters/FanId' },
+							{
+								name: 'matn',
+								in: 'query',
+								schema: { type: 'string', example: 'kasr' },
+								description: 'Mavzu nomi yoki tavsifi bo‘yicha qidiruv',
+							},
+							{
+								name: 'sahifa',
+								in: 'query',
+								schema: { type: 'number', example: 1 },
+								description: 'Sahifa raqami',
+							},
+							{
+								name: 'harSahifadagiSoni',
+								in: 'query',
+								schema: { type: 'number', example: 10 },
+								description: 'Har sahifadagi mavzular soni',
+							},
+							{
+								name: 'saralashMaydoni',
+								in: 'query',
+								schema: {
+									type: 'string',
+									enum: ['nomi', 'yaratilganVaqt', 'yangilanganVaqt'],
+									example: 'yaratilganVaqt',
+								},
+								description: 'Saralash maydoni',
+							},
+							{
+								name: 'yonalish',
+								in: 'query',
+								schema: {
+									type: 'string',
+									enum: ['asc', 'desc'],
+									example: 'desc',
+								},
+								description: 'Saralash yo‘nalishi',
+							},
+						],
 						responses: { 200: { description: 'Mavzular ro‘yxati qaytdi' } },
 					},
 				},
 				'/api/testlar/mavzular/{mavzuId}': {
 					get: {
 						tags: ['Testlar'],
-						summary: 'Test ishlashdan oldin mavzu haqida qisqa ma’lumot olish',
+						summary:
+							'Test ishlashdan oldin mavzu va agar mavjud bo‘lsa faol sessiya kodini olish',
+						description:
+							'Admin oldin sessiya ochgan bo‘lsa, javob ichida `faolSessiya.kod` qaytadi.',
 						parameters: [{ $ref: '#/components/parameters/MavzuId' }],
 						responses: { 200: { description: 'Mavzu ma’lumoti qaytdi' } },
 					},
@@ -639,7 +934,7 @@ function setupSwagger(app) {
 					get: {
 						tags: ['Testlar'],
 						summary:
-							'Testni preview ko‘rinishda boshlash uchun savollarni olish',
+							'Testni preview ko‘rinishda boshlash va agar mavjud bo‘lsa faol sessiya kodini olish',
 						parameters: [
 							{ $ref: '#/components/parameters/MavzuId' },
 							{
@@ -657,7 +952,10 @@ function setupSwagger(app) {
 					},
 					post: {
 						tags: ['Testlar'],
-						summary: 'Yangi test urinishini yaratish va testni boshlash',
+						summary:
+							'Yangi test urinishini yaratish va testni boshlash (ko‘p ishtirokchida faqat kod kifoya)',
+						description:
+							'Admin sessiya ochgan bo‘lsa, kodni avval `GET /api/testlar/mavzular/{mavzuId}` yoki `GET /api/testlar/mavzular/{mavzuId}/boshlash` javobidagi `faolSessiya.kod` orqali ko‘rish mumkin.',
 						parameters: [{ $ref: '#/components/parameters/MavzuId' }],
 						requestBody: {
 							required: false,
